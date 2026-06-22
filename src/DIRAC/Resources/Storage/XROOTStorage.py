@@ -1,7 +1,6 @@
 """Native XRootD storage plugin."""
 
 import datetime
-import errno
 import os
 from urllib import parse
 
@@ -56,13 +55,13 @@ class XROOTStorage(StorageBase):
     @staticmethod
     def _client():
         if _xrootd_client is None:
-            raise RuntimeError("Missing dependency: xrootd>=6.0.3")
+            raise RuntimeError("Missing dependency: xrootd>=6.1.0")
         return _xrootd_client
 
     @staticmethod
     def _flags():
         if _xrootd_flags is None:
-            raise RuntimeError("Missing dependency: xrootd>=6.0.3")
+            raise RuntimeError("Missing dependency: xrootd>=6.1.0")
         return _xrootd_flags
 
     @staticmethod
@@ -104,23 +103,27 @@ class XROOTStorage(StorageBase):
         return int(fileSize / MIN_BANDWIDTH * 4 + 310)
 
     def _configureAuth(self):
-        client = self._client()
-
         if "XrdSecPROTOCOL" not in os.environ:
             os.environ["XrdSecPROTOCOL"] = "gsi,unix"
         if "XrdSecGSIDELEGPROXY" not in os.environ:
             os.environ["XrdSecGSIDELEGPROXY"] = "1"
 
-        envPutString = getattr(client, "EnvPutString", None)
-        if envPutString:
-            envPutString("XrdSecPROTOCOL", os.environ["XrdSecPROTOCOL"])
-            envPutString("XrdSecGSIDELEGPROXY", os.environ["XrdSecGSIDELEGPROXY"])
+        self._setXRootDEnv("XrdSecPROTOCOL", os.environ["XrdSecPROTOCOL"])
+        self._setXRootDEnv("XrdSecGSIDELEGPROXY", os.environ["XrdSecGSIDELEGPROXY"])
 
         proxyLocation = self._proxyLocation()
         if proxyLocation:
             os.environ["X509_USER_PROXY"] = proxyLocation
-            if envPutString:
-                envPutString("X509_USER_PROXY", proxyLocation)
+            self._setXRootDEnv("X509_USER_PROXY", proxyLocation)
+        else:
+            self._delXRootDEnv("X509_USER_PROXY")
+
+    def _setXRootDEnv(self, key, value):
+        self._client().EnvPutString(key, value)
+
+    def _delXRootDEnv(self, key):
+        os.environ.pop(key, None)
+        self._client().EnvDelString(key)
 
     @staticmethod
     def _proxyLocation():
@@ -434,7 +437,7 @@ class XROOTStorage(StorageBase):
             try:
                 metadata = self._metadataFromStat(self._stat(url))
                 if not metadata["File"]:
-                    raise TypeError(errno.EISDIR, "supplied path is not a file")
+                    raise IsADirectoryError("supplied path is not a file")
                 checksum = self._checksum(url)
                 if checksum:
                     metadata["Checksum"] = checksum
@@ -686,5 +689,5 @@ class XROOTStorage(StorageBase):
                 self._callTapeRestMethod(("release", "evict"), url, str(token))
                 successful[url] = str(token)
             except Exception as e:
-                failed[url] = f"Error occured while releasing file {repr(e)}"
+                failed[url] = f"Error occurred while releasing file {e!r}"
         return S_OK({"Failed": failed, "Successful": successful})

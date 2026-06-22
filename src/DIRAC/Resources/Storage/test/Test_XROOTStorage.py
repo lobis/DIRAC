@@ -129,6 +129,11 @@ class _Client:
         return True
 
     @classmethod
+    def EnvDelString(cls, key):
+        cls.env.pop(key, None)
+        return True
+
+    @classmethod
     def FileSystem(cls, endpoint):
         cls.fs = _FileSystem(endpoint)
         return cls.fs
@@ -139,10 +144,15 @@ class XROOTStorageTestCase(unittest.TestCase):
         self.oldClient = xrootStorage._xrootd_client
         self.oldFlags = xrootStorage._xrootd_flags
         self.oldProxyLocation = xrootStorage.getProxyLocation
+        self.oldX509UserProxy = xrootStorage.os.environ.get("X509_USER_PROXY")
+        self.addCleanup(self._restoreXRootGlobals)
+        self.addCleanup(self._restoreProxyEnv)
         xrootStorage._xrootd_client = _Client
         xrootStorage._xrootd_flags = _Flags
         xrootStorage.getProxyLocation = lambda: None
         _CopyProcess.jobs = []
+        _Client.env = {}
+        _Client.fs = None
 
         self.parameters = {
             "Protocol": "root",
@@ -154,10 +164,16 @@ class XROOTStorageTestCase(unittest.TestCase):
             "ChecksumType": "adler32",
         }
 
-    def tearDown(self):
+    def _restoreXRootGlobals(self):
         xrootStorage._xrootd_client = self.oldClient
         xrootStorage._xrootd_flags = self.oldFlags
         xrootStorage.getProxyLocation = self.oldProxyLocation
+
+    def _restoreProxyEnv(self):
+        if self.oldX509UserProxy is None:
+            xrootStorage.os.environ.pop("X509_USER_PROXY", None)
+        else:
+            xrootStorage.os.environ["X509_USER_PROXY"] = self.oldX509UserProxy
 
     def _resource(self):
         resource = XROOTStorage("storageName", self.parameters)
@@ -203,6 +219,16 @@ class XROOTStorageTestCase(unittest.TestCase):
 
         self.assertTrue(res["OK"])
         self.assertTrue(res["Value"]["Successful"]["root://host//path/voName/file"])
+
+    def test_configure_auth_deletes_invalid_x509_proxy_from_xrootd_env(self):
+        _Client.env["X509_USER_PROXY"] = "$MISSING_PROXY"
+        xrootStorage.os.environ["X509_USER_PROXY"] = "$MISSING_PROXY"
+        resource = self._resource()
+
+        resource._configureAuth()
+
+        self.assertNotIn("X509_USER_PROXY", _Client.env)
+        self.assertNotIn("X509_USER_PROXY", xrootStorage.os.environ)
 
 
 if __name__ == "__main__":

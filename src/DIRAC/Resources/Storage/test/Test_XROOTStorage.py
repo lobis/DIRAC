@@ -102,26 +102,45 @@ class _CopyProcess:
         return _Status(), []
 
 
-class _ArchiveInfo:
-    locality = "ONLINE"
+class _StageResponse:
+    requestId = "request-1"
 
 
-class _TapeRestClient:
-    def __init__(self, timeout=-1, cert="", key="", verbosity=0):
+class _StageFileStatus:
+    def __init__(self, path, onDisk):
+        self.path = path
+        self.onDisk = onDisk
+
+
+class _StageStatus:
+    files = [_StageFileStatus("/path/voName/file", True)]
+
+
+class _TapeClient:
+    instances = []
+
+    def __init__(self, timeout=-1):
         self.timeout = timeout
-        self.cert = cert
-        self.key = key
-        self.verbosity = verbosity
+        self.calls = []
+        self.instances.append(self)
 
-    def archive_info(self, urls):
-        return _Status(), [_ArchiveInfo()]
+    def stage(self, url, files):
+        self.calls.append(("stage", url, files))
+        return _Status(), _StageResponse()
+
+    def stage_status(self, url, requestId):
+        self.calls.append(("stage_status", url, requestId))
+        return _Status(), _StageStatus()
+
+    def release(self, url, requestId, paths):
+        self.calls.append(("release", url, requestId, paths))
+        return _Status()
 
 
 class _Client:
     env = {}
     fs = None
     CopyProcess = _CopyProcess
-    TapeRestClient = _TapeRestClient
 
     @classmethod
     def EnvPutString(cls, key, value):
@@ -143,14 +162,17 @@ class XROOTStorageTestCase(unittest.TestCase):
     def setUp(self):
         self.oldClient = xrootStorage._xrootd_client
         self.oldFlags = xrootStorage._xrootd_flags
+        self.oldTapeClient = xrootStorage._xrootd_tape_client
         self.oldProxyLocation = xrootStorage.getProxyLocation
         self.oldX509UserProxy = xrootStorage.os.environ.get("X509_USER_PROXY")
         self.addCleanup(self._restoreXRootGlobals)
         self.addCleanup(self._restoreProxyEnv)
         xrootStorage._xrootd_client = _Client
         xrootStorage._xrootd_flags = _Flags
+        xrootStorage._xrootd_tape_client = _TapeClient
         xrootStorage.getProxyLocation = lambda: None
         _CopyProcess.jobs = []
+        _TapeClient.instances = []
         _Client.env = {}
         _Client.fs = None
 
@@ -167,6 +189,7 @@ class XROOTStorageTestCase(unittest.TestCase):
     def _restoreXRootGlobals(self):
         xrootStorage._xrootd_client = self.oldClient
         xrootStorage._xrootd_flags = self.oldFlags
+        xrootStorage._xrootd_tape_client = self.oldTapeClient
         xrootStorage.getProxyLocation = self.oldProxyLocation
 
     def _restoreProxyEnv(self):
@@ -212,13 +235,41 @@ class XROOTStorageTestCase(unittest.TestCase):
         self.assertTrue(kwargs["force"])
         self.assertTrue(kwargs["mkdir"])
 
-    def test_prestage_status_uses_tape_rest_archive_info(self):
+    def test_prestage_file_uses_tape_client_stage(self):
         resource = self._resource()
 
-        res = resource.prestageFileStatus({"root://host//path/voName/file": "token"})
+        res = resource.prestageFile("root://host//path/voName/file")
+
+        self.assertTrue(res["OK"])
+        self.assertEqual("request-1", res["Value"]["Successful"]["root://host//path/voName/file"])
+        self.assertEqual(
+            [("stage", "root://host//path/voName/file", ["root://host//path/voName/file"])],
+            _TapeClient.instances[0].calls,
+        )
+
+    def test_prestage_status_uses_tape_client_stage_status(self):
+        resource = self._resource()
+
+        res = resource.prestageFileStatus({"root://host//path/voName/file": "request-1"})
 
         self.assertTrue(res["OK"])
         self.assertTrue(res["Value"]["Successful"]["root://host//path/voName/file"])
+        self.assertEqual(
+            [("stage_status", "root://host//path/voName/file", "request-1")],
+            _TapeClient.instances[0].calls,
+        )
+
+    def test_release_file_uses_tape_client_release(self):
+        resource = self._resource()
+
+        res = resource.releaseFile({"root://host//path/voName/file": "request-1"})
+
+        self.assertTrue(res["OK"])
+        self.assertEqual("request-1", res["Value"]["Successful"]["root://host//path/voName/file"])
+        self.assertEqual(
+            [("release", "root://host//path/voName/file", "request-1", ["root://host//path/voName/file"])],
+            _TapeClient.instances[0].calls,
+        )
 
     def test_configure_auth_deletes_invalid_x509_proxy_from_xrootd_env(self):
         _Client.env["X509_USER_PROXY"] = "$MISSING_PROXY"

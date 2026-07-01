@@ -18,13 +18,14 @@ except Exception:
     _xrootd_client = None
     _xrootd_flags = None
 
+try:
+    from XRootD.client.tape import TapeClient as _xrootd_tape_client
+except Exception:
+    _xrootd_tape_client = None
+
 
 MAX_SINGLE_STREAM_SIZE = 1024 * 1024 * 10
 MIN_BANDWIDTH = 0.5 * (1024 * 1024)
-
-
-class MissingTapeRestMethod(RuntimeError):
-    """Raised when the installed XRootD bindings do not expose a tape helper yet."""
 
 
 class XROOTStorage(StorageBase):
@@ -55,13 +56,13 @@ class XROOTStorage(StorageBase):
     @staticmethod
     def _client():
         if _xrootd_client is None:
-            raise RuntimeError("Missing dependency: xrootd>=6.1.0")
+            raise RuntimeError("Missing dependency: xrootd>=6.2.0")
         return _xrootd_client
 
     @staticmethod
     def _flags():
         if _xrootd_flags is None:
-            raise RuntimeError("Missing dependency: xrootd>=6.1.0")
+            raise RuntimeError("Missing dependency: xrootd>=6.2.0")
         return _xrootd_flags
 
     @staticmethod
@@ -180,9 +181,7 @@ class XROOTStorage(StorageBase):
     def _ensureDoubleSlashURL(url):
         parsed = parse.urlsplit(url)
         if parsed.scheme in ("root", "xroot") and parsed.netloc and not parsed.path.startswith("//"):
-            return parse.urlunsplit(
-                (parsed.scheme, parsed.netloc, f"/{parsed.path}", parsed.query, parsed.fragment)
-            )
+            return parse.urlunsplit((parsed.scheme, parsed.netloc, f"/{parsed.path}", parsed.query, parsed.fragment))
         return url
 
     def getURLBase(self, withWSUrl=False):
@@ -614,22 +613,11 @@ class XROOTStorage(StorageBase):
             self._ensureOK(status)
         return {"FilesRemoved": deletedFiles, "SizeRemoved": deletedSize}
 
-    def _tapeRestClient(self):
-        tapeClient = getattr(self._client(), "TapeRestClient", None)
-        if tapeClient is None:
-            raise RuntimeError("XRootD TapeRestClient is not available in the installed xrootd bindings")
-        proxyLocation = self._proxyLocation() or ""
-        return tapeClient(timeout=self.stageTimeout, cert=proxyLocation, key=proxyLocation)
-
-    def _callTapeRestMethod(self, names, *args):
-        tapeClient = self._tapeRestClient()
-        for name in names:
-            method = getattr(tapeClient, name, None)
-            if method is not None:
-                status, response = method(*args)
-                self._ensureOK(status)
-                return response
-        raise MissingTapeRestMethod(f"XRootD TapeRestClient does not provide any of: {', '.join(names)}")
+    def _tapeClient(self):
+        if _xrootd_tape_client is None:
+            raise RuntimeError("Missing dependency: xrootd>=6.2.0 with TapeClient support")
+        self._configureAuth()
+        return _xrootd_tape_client(timeout=self.stageTimeout)
 
     def prestageFile(self, path, lifetime=86400):
         res = checkArgumentFormat(path)
@@ -645,13 +633,11 @@ class XROOTStorage(StorageBase):
         return S_OK({"Failed": failed, "Successful": successful})
 
     def _prestageSingleFile(self, path, lifetime):
-        try:
-            response = self._callTapeRestMethod(("stage", "prestage", "bring_online", "bringOnline"), [path], lifetime)
-            return getattr(response, "token", response)
-        except MissingTapeRestMethod:
-            status, _ = self._filesystem().prepare([self._urlToPath(path)], self._flags().PrepareFlags.STAGE)
-            self._ensureOK(status)
-            return "xrootd-prepare"
+        if lifetime != 86400:
+            self.log.debug("Ignoring requested tape stage lifetime because XRootD TapeClient does not support it yet")
+        status, response = self._tapeClient().stage(path, [path])
+        self._ensureOK(status)
+        return getattr(response, "requestId", response)
 
     def prestageFileStatus(self, path):
         res = checkArgumentFormat(path)
@@ -667,16 +653,13 @@ class XROOTStorage(StorageBase):
         return S_OK({"Failed": failed, "Successful": successful})
 
     def _prestageSingleFileStatus(self, path, token):
-        try:
-            response = self._callTapeRestMethod(("stage_status", "prestage_status", "bring_online_poll"), path, token)
-            return bool(getattr(response, "staged", response))
-        except MissingTapeRestMethod:
-            status, archiveInfo = self._tapeRestClient().archive_info([path])
-            self._ensureOK(status)
-            if not archiveInfo:
-                return False
-            locality = str(getattr(archiveInfo[0], "locality", "")).upper()
-            return "ONLINE" in locality or "DISK" in locality
+        status, response = self._tapeClient().stage_status(path, str(token))
+        self._ensureOK(status)
+        expectedPath = self._urlToPath(path)
+        for fileStatus in getattr(response, "files", []):
+            if getattr(fileStatus, "path", "") == expectedPath:
+                return bool(getattr(fileStatus, "onDisk", False))
+        return False
 
     def releaseFile(self, path):
         res = checkArgumentFormat(path)
@@ -686,7 +669,9 @@ class XROOTStorage(StorageBase):
         successful = {}
         for url, token in res["Value"].items():
             try:
-                self._callTapeRestMethod(("release", "evict"), url, str(token))
+                token = str(token)
+                status = self._tapeClient().release(url, token, [url])
+                self._ensureOK(status)
                 successful[url] = str(token)
             except Exception as e:
                 failed[url] = f"Error occurred while releasing file {e!r}"

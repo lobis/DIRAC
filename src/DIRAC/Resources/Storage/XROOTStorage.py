@@ -633,11 +633,9 @@ class XROOTStorage(StorageBase):
         return S_OK({"Failed": failed, "Successful": successful})
 
     def _prestageSingleFile(self, path, lifetime):
-        if lifetime != 86400:
-            self.log.debug("Ignoring requested tape stage lifetime because XRootD TapeClient does not support it yet")
-        status, response = self._tapeClient().stage(path, [path])
+        status, response = self._tapeClient().stage(path, [path], disk_lifetime=lifetime)
         self._ensureOK(status)
-        return getattr(response, "requestId", response)
+        return response.request_id
 
     def prestageFileStatus(self, path):
         res = checkArgumentFormat(path)
@@ -655,11 +653,7 @@ class XROOTStorage(StorageBase):
     def _prestageSingleFileStatus(self, path, token):
         status, response = self._tapeClient().stage_status(path, str(token))
         self._ensureOK(status)
-        expectedPath = self._urlToPath(path)
-        for fileStatus in getattr(response, "files", []):
-            if getattr(fileStatus, "path", "") == expectedPath:
-                return bool(getattr(fileStatus, "onDisk", False))
-        return False
+        return response.is_on_disk(path)
 
     def releaseFile(self, path):
         res = checkArgumentFormat(path)

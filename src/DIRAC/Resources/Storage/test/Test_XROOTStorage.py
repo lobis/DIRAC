@@ -103,17 +103,12 @@ class _CopyProcess:
 
 
 class _StageResponse:
-    requestId = "request-1"
-
-
-class _StageFileStatus:
-    def __init__(self, path, onDisk):
-        self.path = path
-        self.onDisk = onDisk
+    request_id = "request-1"
 
 
 class _StageStatus:
-    files = [_StageFileStatus("/path/voName/file", True)]
+    def is_on_disk(self, path):
+        return path == "root://host//path/voName/file"
 
 
 class _TapeClient:
@@ -124,8 +119,8 @@ class _TapeClient:
         self.calls = []
         self.instances.append(self)
 
-    def stage(self, url, files):
-        self.calls.append(("stage", url, files))
+    def stage(self, url, files, disk_lifetime=None):
+        self.calls.append(("stage", url, files, disk_lifetime))
         return _Status(), _StageResponse()
 
     def stage_status(self, url, requestId):
@@ -243,7 +238,19 @@ class XROOTStorageTestCase(unittest.TestCase):
         self.assertTrue(res["OK"])
         self.assertEqual("request-1", res["Value"]["Successful"]["root://host//path/voName/file"])
         self.assertEqual(
-            [("stage", "root://host//path/voName/file", ["root://host//path/voName/file"])],
+            [("stage", "root://host//path/voName/file", ["root://host//path/voName/file"], 86400)],
+            _TapeClient.instances[0].calls,
+        )
+
+    def test_prestage_file_passes_lifetime_to_tape_client(self):
+        resource = self._resource()
+
+        res = resource.prestageFile("root://host//path/voName/file", lifetime=3600)
+
+        self.assertTrue(res["OK"])
+        self.assertEqual("request-1", res["Value"]["Successful"]["root://host//path/voName/file"])
+        self.assertEqual(
+            [("stage", "root://host//path/voName/file", ["root://host//path/voName/file"], 3600)],
             _TapeClient.instances[0].calls,
         )
 

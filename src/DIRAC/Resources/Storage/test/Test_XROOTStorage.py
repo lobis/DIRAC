@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import MagicMock
 
 import DIRAC.Resources.Storage.XROOTStorage as xrootStorage
+from DIRAC.Resources.Storage.CTAStorage import CTAStorage
 from DIRAC.Resources.Storage.XROOTStorage import XROOTStorage
 
 
@@ -111,6 +112,14 @@ class _StageStatus:
         return path == "root://host//path/voName/file"
 
 
+class _ArchiveInfoItem:
+    def __init__(self, url, locality="TAPE", error=None):
+        self.url = url
+        self.path = url
+        self.locality = locality
+        self.error = error
+
+
 class _TapeClient:
     instances = []
 
@@ -118,6 +127,10 @@ class _TapeClient:
         self.timeout = timeout
         self.calls = []
         self.instances.append(self)
+
+    def archive_info(self, urls):
+        self.calls.append(("archive_info", urls))
+        return _Status(), [_ArchiveInfoItem(u) for u in urls]
 
     def stage(self, url, files, disk_lifetime=None):
         self.calls.append(("stage", url, files, disk_lifetime))
@@ -287,6 +300,23 @@ class XROOTStorageTestCase(unittest.TestCase):
 
         self.assertNotIn("X509_USER_PROXY", _Client.env)
         self.assertNotIn("X509_USER_PROXY", xrootStorage.os.environ)
+
+    def test_cta_storage_file_metadata_enriches_with_tape_locality(self):
+        resource = CTAStorage("storageName", self.parameters)
+        resource.se = MagicMock()
+        resource.se.vo = "voName"
+
+        res = resource.getFileMetadata("root://host//path/voName/file")
+
+        self.assertTrue(res["OK"])
+        metadata = res["Value"]["Successful"]["root://host//path/voName/file"]
+        self.assertEqual(4, metadata["Size"])
+        self.assertEqual("deadbeef", metadata["Checksum"])
+        self.assertEqual(0, metadata["Cached"])
+        self.assertEqual(1, metadata["Migrated"])
+        self.assertFalse(metadata["Accessible"])
+        self.assertEqual("NEARLINE", metadata["user.status"])
+        self.assertEqual([("archive_info", ["root://host//path/voName/file"])], _TapeClient.instances[0].calls)
 
 
 if __name__ == "__main__":

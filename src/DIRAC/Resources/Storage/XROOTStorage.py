@@ -432,7 +432,19 @@ class XROOTStorage(StorageBase):
             return res
         failed = {}
         successful = {}
-        for url in res["Value"]:
+        urls = res["Value"]
+
+        tapeInfo = {}
+        if self._defaultExtendedAttributes or hasattr(self, "_updateMetadataDict"):
+            try:
+                status, infos = self._tapeClient().archive_info(list(urls))
+                if self._statusOK(status):
+                    for info in infos:
+                        tapeInfo[info.url] = info
+            except Exception as e:
+                self.log.debug(f"Could not retrieve tape archive info: {e!r}")
+
+        for url in urls:
             try:
                 metadata = self._metadataFromStat(self._stat(url))
                 if not metadata["File"]:
@@ -440,6 +452,13 @@ class XROOTStorage(StorageBase):
                 checksum = self._checksum(url)
                 if checksum:
                     metadata["Checksum"] = checksum
+                if hasattr(self, "_updateMetadataDict"):
+                    info = tapeInfo.get(url)
+                    if info is not None:
+                        if getattr(info, "error", None):
+                            self.log.debug(f"Tape archive info error for {url}: {info.error}")
+                        else:
+                            self._updateMetadataDict(metadata, {"locality": getattr(info, "locality", None)})
                 successful[url] = metadata
             except Exception as e:
                 failed[url] = repr(e)

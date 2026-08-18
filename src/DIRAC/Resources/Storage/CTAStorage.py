@@ -1,14 +1,17 @@
+""".. class:: CTAStorage
+
+Plugin to interact with CERN CTA and WLCG Tape REST endpoints.
+"""
 from DIRAC import gLogger
-from DIRAC.Resources.Storage.GFAL2_XROOTStorage import GFAL2_XROOTStorage
-from DIRAC.Resources.Storage.GFAL2_SRM2Storage import GFAL2_SRM2Storage
+from DIRAC.Resources.Storage.XROOTStorage import XROOTStorage
 
 sLog = gLogger.getSubLogger(__name__)
 
 
-class CTAStorage(GFAL2_XROOTStorage):
-    """Plugin to interact with CERN CTA.
+class CTAStorage(XROOTStorage):
+    """Plugin to interact with CERN CTA and WLCG Tape REST compliant tape endpoints.
 
-    It basically is XROOT with added tape capabilities.
+    It is XROOT with added tape capabilities via the WLCG Tape REST API.
     Since CTA supports ONLY xroot, do not forget to add
     xroot in your `Operations/DataManagement/RegistrationProtocols` list
 
@@ -21,7 +24,7 @@ class CTAStorage(GFAL2_XROOTStorage):
             BackendType = Cta
             AccessProtocols = root
             WriteProtocols = root
-            # This is very important if you have to stage with this protocol,  but might transfer
+            # This is very important if you have to stage with this protocol, but might transfer
             # using a different protocol, like https
             StageProtocols = root
             SEType = T1D0
@@ -37,23 +40,9 @@ class CTAStorage(GFAL2_XROOTStorage):
               Path = /eos/ctalhcbpps/archivetest/
               Access = remote
             }
-            ###################################
-            GFAL2_HTTPS
-            {
-              Host = eosctalhcbpps.cern.ch
-              Protocol = https
-              Path = /eos/ctalhcbpps/archivetest/
-              Access = remote
-            }
           }
         }
     """
-
-    # Copy from SRM the method that updates the metadata
-    # info with the tape specific information (Cached, Migrated, etc)
-    # Note: `meth = Class.meth` does not work because it would assign to B
-    # an unbound method of A.
-    _updateMetadataDict = GFAL2_SRM2Storage.__dict__["_updateMetadataDict"]
 
     def __init__(self, storageName, parameters):
         """c'tor
@@ -62,12 +51,75 @@ class CTAStorage(GFAL2_XROOTStorage):
         :param str storageName: SE name
         :param dict parameters: passed to parent's class
         """
-        # # init base class
         super().__init__(storageName, parameters)
-
         self.log = sLog.getSubLogger(storageName)
-
         self.pluginName = "CTA"
-
-        # We need user.status for Tape metadata
         self._defaultExtendedAttributes = ["user.status"]
+
+    def _fetchTapeArchiveInfo(self, urls):
+        """Fetch tape archive info for a list of URLs via the WLCG Tape REST API."""
+        tapeInfo = {}
+        try:
+            status, infos = self._tapeClient().archive_info(list(urls))
+            if self._statusOK(status):
+                for info in infos:
+                    key = getattr(info, "url", getattr(info, "path", None))
+                    if key:
+                        tapeInfo[key] = info
+        except Exception as e:
+            self.log.debug(f"Could not retrieve tape archive info: {e!r}")
+        return tapeInfo
+
+    def _enrichMetadata(self, metadata, url, tapeInfo=None):
+        """Enrich file metadata with tape locality attributes."""
+        if not tapeInfo:
+            return
+        info = tapeInfo.get(url)
+        if info is not None:
+            if getattr(info, "error", None):
+                self.log.debug(f"Tape archive info error for {url}: {info.error}")
+            else:
+                self._updateMetadataDict(metadata, {"locality": getattr(info, "locality", None)})
+
+    def _updateMetadataDict(self, metadataDict, attributeDict):
+        """Updating the metadata dictionary with tape specific attributes
+
+        :param dict metadataDict: metadataDict to add tape specific attributes to
+        :param dict attributeDict: contains 'locality' or 'user.status'
+        """
+        locality = attributeDict.get("locality") or attributeDict.get("user.status", "")
+        if locality == "DISK_AND_TAPE" or "ONLINE_AND_NEARLINE" in locality:
+            metadataDict["Cached"] = 1
+            metadataDict["Migrated"] = 1
+            metadataDict["Lost"] = 0
+            metadataDict["Unavailable"] = 0
+            metadataDict["Accessible"] = True
+            metadataDict["user.status"] = "ONLINE_AND_NEARLINE"
+        elif locality == "TAPE" or "NEARLINE" in locality:
+            metadataDict["Cached"] = 0
+            metadataDict["Migrated"] = 1
+            metadataDict["Lost"] = 0
+            metadataDict["Unavailable"] = 0
+            metadataDict["Accessible"] = False
+            metadataDict["user.status"] = "NEARLINE"
+        elif locality == "DISK" or "ONLINE" in locality:
+            metadataDict["Cached"] = 1
+            metadataDict["Migrated"] = 0
+            metadataDict["Lost"] = 0
+            metadataDict["Unavailable"] = 0
+            metadataDict["Accessible"] = True
+            metadataDict["user.status"] = "ONLINE"
+        elif locality == "LOST":
+            metadataDict["Cached"] = 0
+            metadataDict["Migrated"] = 0
+            metadataDict["Lost"] = 1
+            metadataDict["Unavailable"] = 0
+            metadataDict["Accessible"] = False
+            metadataDict["user.status"] = "LOST"
+        elif locality == "UNAVAILABLE":
+            metadataDict["Cached"] = 0
+            metadataDict["Migrated"] = 0
+            metadataDict["Lost"] = 0
+            metadataDict["Unavailable"] = 1
+            metadataDict["Accessible"] = False
+            metadataDict["user.status"] = "UNAVAILABLE"

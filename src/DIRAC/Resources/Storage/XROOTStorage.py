@@ -1,7 +1,6 @@
 """Native XRootD storage plugin."""
 
 import datetime
-import errno
 import os
 from urllib import parse
 
@@ -57,13 +56,13 @@ class XROOTStorage(StorageBase):
     @staticmethod
     def _client():
         if _xrootd_client is None:
-            raise RuntimeError("Missing dependency: xrootd>=6.2.0")
+            raise RuntimeError("Missing dependency: native Python helpers from lobis/xrootd PR #57")
         return _xrootd_client
 
     @staticmethod
     def _flags():
         if _xrootd_flags is None:
-            raise RuntimeError("Missing dependency: xrootd>=6.2.0")
+            raise RuntimeError("Missing dependency: native Python helpers from lobis/xrootd PR #57")
         return _xrootd_flags
 
     @staticmethod
@@ -75,32 +74,10 @@ class XROOTStorage(StorageBase):
         return str(getattr(status, "message", status))
 
     @classmethod
-    def _isNotFound(cls, status):
-        if status is None:
-            return False
-        return (
-            getattr(status, "errno", None) == errno.ENOENT
-            or getattr(status, "code", None) == getattr(status, "errNotFound", None)
-            or getattr(status, "shellcode", None) == 54
-            or "No such file" in cls._statusMessage(status)
-            or "not found" in cls._statusMessage(status).lower()
-        )
-
-    @classmethod
-    def _isFileExists(cls, status):
-        return status is not None and "file exists" in cls._statusMessage(status).lower()
-
-    @classmethod
     def _ensureOK(cls, status):
         if status is not None and cls._statusOK(status):
             return
         raise RuntimeError(cls._statusMessage(status))
-
-    @classmethod
-    def _responseText(cls, response):
-        if isinstance(response, bytes):
-            return response.decode()
-        return response
 
     def _estimateTransferTimeout(self, fileSize):
         return int(fileSize / MIN_BANDWIDTH * 4 + 310)
@@ -165,9 +142,14 @@ class XROOTStorage(StorageBase):
     def _pathToURL(self, path):
         if parse.urlparse(path).scheme:
             return path
-        base = self.getURLBase().rstrip("/")
-        cleanPath = path.lstrip("/")
-        return f"{base}/{cleanPath}"
+        result = self.getURLBase()
+        if not result["OK"]:
+            raise ValueError(result["Message"])
+        base = parse.urlsplit(result["Value"])
+        remotePath, separator, query = path.partition("?")
+        return parse.urlunsplit(
+            (base.scheme, base.netloc, "//" + remotePath.lstrip("/"), query if separator else base.query, "")
+        )
 
     def _addDoubleSlash(self, res):
         if not res["OK"]:
@@ -199,9 +181,7 @@ class XROOTStorage(StorageBase):
         return self._addDoubleSlash(super().getCurrentURL(fileName))
 
     def _stat(self, path):
-        status, statInfo = self._filesystem().stat(self._urlToPath(path))
-        self._ensureOK(status)
-        return statInfo
+        return self._filesystem().stat_info(self._urlToPath(path), timeout=self.xrootdTimeout)
 
     def _metadataFromStat(self, statInfo):
         flags = getattr(statInfo, "flags", 0)
@@ -210,7 +190,7 @@ class XROOTStorage(StorageBase):
         metadata = {
             "Size": int(getattr(statInfo, "size", 0)),
             "Directory": isDir,
-            "File": not isDir,
+            "File": not bool(flags & (self._flags().StatInfoFlags.IS_DIR | self._flags().StatInfoFlags.OTHER)),
             "FileFlags": flags,
             "ModTime": datetime.datetime.fromtimestamp(modTime) if modTime else None,
             "ChangeTime": None,
@@ -232,17 +212,10 @@ class XROOTStorage(StorageBase):
     def _checksum(self, path):
         if not self.checksumType:
             return None
-        status, checksum = self._filesystem().query(self._flags().QueryCode.CHECKSUM, self._urlToPath(path))
-        self._ensureOK(status)
-        checksum = self._responseText(checksum).strip("\n\0")
-        if not checksum:
-            return None
-        tokens = checksum.split(None, 1)
-        if len(tokens) == 2:
-            checksumType, checksumValue = tokens
-            if checksumType.lower() == self.checksumType.lower():
-                return checksumValue
-        return None
+        _, digest = self._filesystem().checksum(
+            self._urlToPath(path), algorithm=self.checksumType, timeout=self.xrootdTimeout
+        )
+        return digest
 
     def exists(self, path):
         res = checkArgumentFormat(path)
@@ -251,13 +224,10 @@ class XROOTStorage(StorageBase):
         successful = {}
         failed = {}
         for url in res["Value"]:
-            status, _ = self._filesystem().stat(self._urlToPath(url))
-            if self._statusOK(status):
-                successful[url] = True
-            elif self._isNotFound(status):
-                successful[url] = False
-            else:
-                failed[url] = self._statusMessage(status)
+            try:
+                successful[url] = self._filesystem().exists(self._urlToPath(url), timeout=self.xrootdTimeout)
+            except Exception as e:
+                failed[url] = repr(e)
         return S_OK({"Failed": failed, "Successful": successful})
 
     def isDirectory(self, path):
@@ -345,7 +315,7 @@ class XROOTStorage(StorageBase):
         failed = {}
         successful = {}
         for srcURL in res["Value"]:
-            fileName = os.path.basename(self._urlToPath(srcURL).rstrip("/"))
+            fileName = os.path.basename(self._urlToPath(srcURL).partition("?")[0].rstrip("/"))
             destFile = os.path.join(localPath if localPath else os.getcwd(), fileName)
             try:
                 successful[srcURL] = self._getSingleFile(srcURL, destFile)
@@ -369,21 +339,17 @@ class XROOTStorage(StorageBase):
         self._configureAuth()
         fileSize = int(fileSize or 0)
         timeout = self._estimateTransferTimeout(fileSize)
-        process = self._client().CopyProcess()
-        process.add_job(
+        self._client().CopyProcess.copy_one(
             source,
             target,
             force=True,
             mkdir=True,
+            checksummode="end2end" if self.checksumType else "none",
+            checksumtype=self.checksumType or "",
             cptimeout=timeout,
             inittimeout=self.xrootdTimeout,
             parallelchunks=4 if fileSize > MAX_SINGLE_STREAM_SIZE else 1,
         )
-        self._ensureOK(process.prepare())
-        status, results = process.run()
-        if not self._statusOK(status) and results:
-            status = results[0].get("status", status)
-        self._ensureOK(status)
 
     def removeFile(self, path):
         res = checkArgumentFormat(path)
@@ -399,10 +365,7 @@ class XROOTStorage(StorageBase):
         return S_OK({"Failed": failed, "Successful": successful})
 
     def _removeSingleFile(self, path):
-        status, _ = self._filesystem().rm(self._urlToPath(path))
-        if self._isNotFound(status):
-            return True
-        self._ensureOK(status)
+        self._filesystem().unlink(self._urlToPath(path), missing_ok=True, timeout=self.xrootdTimeout)
         return True
 
     def removeDirectory(self, path, recursive=False):
@@ -419,32 +382,19 @@ class XROOTStorage(StorageBase):
         return S_OK({"Failed": failed, "Successful": successful})
 
     def _removeSingleDirectory(self, path, recursive=False):
-        if not recursive:
-            status, _ = self._filesystem().rmdir(self._urlToPath(path))
-            if self._isNotFound(status):
-                return {"FilesRemoved": 0, "SizeRemoved": 0}
-            self._ensureOK(status)
-            return {"FilesRemoved": 0, "SizeRemoved": 0}
+        if recursive:
+            result = self._filesystem().remove_tree(self._urlToPath(path), missing_ok=True, timeout=self.xrootdTimeout)
+            return {"FilesRemoved": result.files_removed, "SizeRemoved": result.size_removed}
+        # rmdir keeps its native status-tuple API. Use the shared mapping so
+        # only a missing directory is accepted, never permission/I/O errors.
+        from XRootD.client.responses import raise_as_oserror
 
-        content = self._listSingleDirectory(path, internalCall=True)
-        filesRemoved = 0
-        sizeRemoved = 0
-
-        for fileURL, metadata in content["Files"].items():
-            self._removeSingleFile(fileURL)
-            filesRemoved += 1
-            sizeRemoved += metadata.get("Size", 0)
-
-        for subDirURL in content["SubDirs"]:
-            res = self._removeSingleDirectory(subDirURL, recursive=True)
-            filesRemoved += res["FilesRemoved"]
-            sizeRemoved += res["SizeRemoved"]
-
-        status, _ = self._filesystem().rmdir(self._urlToPath(path))
-        if not self._isNotFound(status):
-            self._ensureOK(status)
-
-        return {"FilesRemoved": filesRemoved, "SizeRemoved": sizeRemoved}
+        status, _ = self._filesystem().rmdir(self._urlToPath(path), timeout=self.xrootdTimeout)
+        try:
+            raise_as_oserror(status, path)
+        except FileNotFoundError:
+            pass
+        return {"FilesRemoved": 0, "SizeRemoved": 0}
 
     def getFileMetadata(self, path):
         res = checkArgumentFormat(path)
@@ -485,11 +435,11 @@ class XROOTStorage(StorageBase):
         failed = {}
         successful = {}
         for url in res["Value"]:
-            status, _ = self._filesystem().mkdir(self._urlToPath(url), self._flags().MkDirFlags.MAKEPATH)
-            if self._statusOK(status) or self._isFileExists(status):
+            try:
+                self._filesystem().makedirs(self._urlToPath(url), exist_ok=True, timeout=self.xrootdTimeout)
                 successful[url] = True
-            else:
-                failed[url] = self._statusMessage(status)
+            except Exception as e:
+                failed[url] = repr(e)
         return S_OK({"Failed": failed, "Successful": successful})
 
     def listDirectory(self, path):
@@ -507,17 +457,13 @@ class XROOTStorage(StorageBase):
 
     def _listSingleDirectory(self, path, internalCall=False):
         xrootdPath = self._urlToPath(path)
-        status, listing = self._filesystem().dirlist(xrootdPath, self._flags().DirListFlags.STAT)
-        self._ensureOK(status)
+        listing = self._filesystem().scandir(xrootdPath, timeout=self.xrootdTimeout)
         files = {}
         subDirs = {}
         for entry in listing:
-            entryName = getattr(entry, "name", str(entry))
-            entryPath = os.path.join(xrootdPath.rstrip("/"), entryName)
+            entryPath = entry.path
             entryURL = self._pathToURL(entryPath)
-            statInfo = getattr(entry, "statinfo", None)
-            if statInfo is None:
-                statInfo = self._stat(entryURL)
+            statInfo = entry.stat()
             metadata = self._metadataFromStat(statInfo)
             outputPath = entryURL if internalCall else self._storagePathToLFN(entryPath)
             if metadata["Directory"]:
@@ -528,7 +474,7 @@ class XROOTStorage(StorageBase):
 
     def _storagePathToLFN(self, path):
         basePath = os.path.normpath(self.protocolParameters["Path"])
-        normPath = os.path.normpath(path)
+        normPath = os.path.normpath("/" + path.partition("?")[0].lstrip("/"))
         if basePath and (normPath == basePath or normPath.startswith(basePath.rstrip("/") + "/")):
             lfn = normPath[len(basePath) :]
             return lfn if lfn.startswith("/") else f"/{lfn}"

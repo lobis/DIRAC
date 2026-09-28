@@ -3,8 +3,9 @@
 This change belongs to `lobis/DIRAC#2`, based on the fork's `integration`
 branch. It requires the Python helpers from `lobis/xrootd#57`; it does not
 claim compatibility with an unmodified XRootD 6.2 release. The native-storage
-workflow pins an immutable implementation commit, excluding the benchmark
-commit. No fsspec dependency or global protocol registration is needed here.
+workflow pins an immutable implementation commit. Benchmark material is
+excluded from the source branch. No fsspec dependency or global protocol
+registration is needed here.
 
 The classic XRootD bindings and synchronous helpers remain installable on
 Python 3.6 (AlmaLinux 8). The optional native asyncio and fsspec interfaces

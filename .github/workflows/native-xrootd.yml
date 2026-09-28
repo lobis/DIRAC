@@ -25,7 +25,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           repository: lobis/xrootd
-          ref: ef21b8f19019bcdf1d6445e14849b32645d4c68e
+          ref: 08517c1cced0b30287dc2fe6111bf7c170996165
           path: .native-xrootd
           fetch-depth: 0
           persist-credentials: false

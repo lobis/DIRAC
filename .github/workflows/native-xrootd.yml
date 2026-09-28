@@ -23,7 +23,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           repository: lobis/xrootd
-          ref: b39ae0f1aea0e403cedabb35b0eb6bb7d0847f36
+          ref: ef21b8f19019bcdf1d6445e14849b32645d4c68e
           path: .native-xrootd
           fetch-depth: 0
       - name: Install build and focused test dependencies

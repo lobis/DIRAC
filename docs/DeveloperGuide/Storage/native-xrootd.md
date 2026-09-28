@@ -6,6 +6,13 @@ claim compatibility with an unmodified XRootD 6.2 release. The native-storage
 workflow pins an immutable implementation commit, excluding the benchmark
 commit. No fsspec dependency or global protocol registration is needed here.
 
+The classic XRootD bindings and synchronous helpers remain installable on
+Python 3.6 (AlmaLinux 8). The optional native asyncio and fsspec interfaces
+require Python 3.11 or later and raise a clear `ImportError` on older Python.
+DIRAC already requires Python >= 3.11, so both interfaces are available to this
+integration. All distributed XRootD Python files retain Python 3.6-compatible
+syntax for installation and byte-compilation on AlmaLinux 8.
+
 ## Interfaces adopted
 
 | DIRAC operation | Native interface | Benefit |
@@ -81,9 +88,10 @@ through DIRAC and reads the same bytes with concurrent `read_at` and
    cancellation during prepare/transfer, callback-thread affinity, duplicate
    completion, per-job failures and checksum mismatch. An executor wrapper
    around today's blocking `run()` would not establish this contract.
-2. **[Python] Add awaitable Tape REST operations.** Add callback completion to
-   the TapeClient binding, then `aio.TapeClient.stage`, `stage_status`,
-   `archive_info`, and `release`. Define whether cancelling a submitted stage
+2. **[Python] Add awaitable Tape REST operations.** Expose the existing native
+   callback-capable prepare/query operations through `aio.FileSystem.prepare`
+   and `aio.TapeClient.stage`, `stage_status`, `archive_info`, and `release`.
+   Define whether cancelling a submitted stage
    only cancels the local wait or also requests remote stage cancellation;
    never silently cancel the remote request. Test partial per-file errors,
    timeouts, cleanup and late completion. CTA's metadata enrichment currently

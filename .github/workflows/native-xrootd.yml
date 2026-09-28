@@ -1,0 +1,64 @@
+name: Native XRootD storage
+
+on:
+  pull_request:
+    branches: [integration]
+  push:
+    branches: [feat/xrootd-tape-storage]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-storage:
+    if: github.repository == 'lobis/DIRAC'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - uses: actions/checkout@v6
+        with:
+          repository: lobis/xrootd
+          ref: 08517c1cced0b30287dc2fe6111bf7c170996165
+          path: .native-xrootd
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install build and focused test dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y cmake libssl-dev libcurl4-openssl-dev \
+            libxml2-dev zlib1g-dev uuid-dev libkrb5-dev libreadline-dev
+          python -m pip install setuptools wheel pytest pytest-cov diraccfg \
+            pydantic packaging python-dateutil psutil importlib_metadata \
+            importlib_resources cachetools requests PyYAML
+      - name: Build pinned native server and Python bindings
+        run: |
+          cmake -S .native-xrootd -B .native-build -DCMAKE_BUILD_TYPE=Release \
+            -DENABLE_PYTHON=ON -DENABLE_TESTS=OFF -DENABLE_HTTP=OFF \
+            -DPython_EXECUTABLE="$(command -v python)"
+          cmake --build .native-build --parallel 2
+      - name: Test storage contracts and real native I/O
+        env:
+          PYTHONPATH: ${{ github.workspace }}/src:${{ github.workspace }}/dirac-common/src:${{ github.workspace }}/.native-build/python/site-packages
+          LD_LIBRARY_PATH: ${{ github.workspace }}/.native-build/lib
+          XROOTD: ${{ github.workspace }}/.native-build/bin/xrootd
+          XRDFS: ${{ github.workspace }}/.native-build/bin/xrdfs
+        run: |
+          python -c 'from XRootD.client import FileSystem; assert callable(FileSystem.stat_info)'
+          python -m pytest -o addopts= -q \
+            --cov=DIRAC.Resources.Storage.XROOTStorage \
+            --cov=DIRAC.Resources.Storage.CTAStorage --cov-branch \
+            --cov-fail-under=95 --cov-report=term-missing --cov-report=xml \
+            src/DIRAC/Resources/Storage/test/Test_XROOTStorage.py \
+            src/DIRAC/Resources/Storage/test/Test_XROOTStorageNative.py
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: native-storage-coverage
+          path: coverage.xml
